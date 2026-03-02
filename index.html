@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MC Seed Map - Minecraft Seed Viewer</title>
+  <meta name="description" content="Free online Minecraft seed map viewer. Find biomes, structures, villages, strongholds, and more. Client-side, no ads, privacy-first." />
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0f0f1a; }
+    #mc-seed-map-app { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    #mc-map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+    #mc-controls { position: absolute; top: 12px; left: 12px; z-index: 1000; }
+    #mc-loading-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: #0f0f1a; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    }
+    #mc-loading-overlay .spinner { width: 36px; height: 36px; border: 3px solid rgba(126,200,227,0.2); border-top-color: #7ec8e3; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #mc-loading-text { color: rgba(255,255,255,0.5); font-family: sans-serif; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="mc-seed-map-app">
+    <div id="mc-map"></div>
+    <div id="mc-controls"></div>
+    <div id="mc-loading-overlay">
+      <div class="spinner"></div>
+      <div id="mc-loading-text">Loading seed map engine...</div>
+    </div>
+  </div>
+  <script src="embed.js"></script>
+</body>
+</html>
