@@ -190,115 +190,166 @@
   }
 
   /* ============================================================
-   *  WORKER CREATION
+   *  WORKER POOL — multiple workers for parallel tile generation
    * ============================================================ */
-  function createWorker() {
+  var WORKER_POOL_SIZE = 3;
+
+  function buildWorkerSrc(apiCode) {
+    return [
+      '/* Emscripten glue */',
+      apiCode,
+      '',
+      'var Module = null;',
+      'function toBigInt(val) { if (typeof val === "bigint") return val; return BigInt(Math.trunc(val)); }',
+      '',
+      'async function initWasm() {',
+      '  Module = await createModule({ locateFile: function(path) { return "' + WASM_BASE + '" + path; } });',
+      '  Module._init_colors();',
+      '}',
+      '',
+      'function handleGenerateBiomeImage(data) {',
+      '  var fn = data.flags && Module._generate_biome_image_ex ? Module._generate_biome_image_ex : Module._generate_biome_image;',
+      '  var ptr;',
+      '  if (data.flags && Module._generate_biome_image_ex) {',
+      '    ptr = fn(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.width, data.height, data.scale, data.flags || 0);',
+      '  } else {',
+      '    ptr = Module._generate_biome_image(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.width, data.height, data.scale);',
+      '  }',
+      '  if (!ptr) return { type: "biomeImage", requestId: data.requestId, error: "Generation failed" };',
+      '  var size = data.width * data.height * 4;',
+      '  var pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, size).slice();',
+      '  Module._free_memory(ptr);',
+      '  return { type: "biomeImage", requestId: data.requestId, pixels: pixels, width: data.width, height: data.height };',
+      '}',
+      '',
+      'function handleFindStructures(data) {',
+      '  var count = data.fast ? Module._find_structures_fast(toBigInt(data.seed), data.mcVersion, data.structType, data.regXMin, data.regZMin, data.regXMax, data.regZMax) : Module._find_structures(toBigInt(data.seed), data.mcVersion, data.structType, data.regXMin, data.regZMin, data.regXMax, data.regZMax);',
+      '  var positions = [];',
+      '  for (var i = 0; i < count; i++) { positions.push({ x: Module._get_structure_x(i), z: Module._get_structure_z(i) }); }',
+      '  return { type: "structures", requestId: data.requestId, positions: positions, structKey: data.structKey };',
+      '}',
+      '',
+      'function handleFindSpawn(data) {',
+      '  return { type: "spawn", requestId: data.requestId, x: Module._get_spawn_x(toBigInt(data.seed), data.mcVersion), z: Module._get_spawn_z(toBigInt(data.seed), data.mcVersion) };',
+      '}',
+      '',
+      'function handleFindStrongholds(data) {',
+      '  var found = Module._find_strongholds(toBigInt(data.seed), data.mcVersion, data.count || 3);',
+      '  var positions = [];',
+      '  for (var i = 0; i < found; i++) { positions.push({ x: Module._get_stronghold_x(i), z: Module._get_stronghold_z(i) }); }',
+      '  return { type: "strongholds", requestId: data.requestId, positions: positions };',
+      '}',
+      '',
+      'function handleCheckSlimeBatch(data) {',
+      '  var ptr = Module._check_slime_batch(toBigInt(data.seed), data.chunkXMin, data.chunkZMin, data.width, data.height);',
+      '  if (!ptr) return { type: "slimeBatch", requestId: data.requestId, error: "Batch failed" };',
+      '  var total = data.width * data.height;',
+      '  var result = new Uint8Array(Module.HEAPU8.buffer, ptr, total).slice();',
+      '  return { type: "slimeBatch", requestId: data.requestId, result: result, width: data.width, height: data.height };',
+      '}',
+      '',
+      'function handleGetBiomeAt(data) {',
+      '  if (!Module._get_biome_at_pos) return { type: "biomeAt", requestId: data.requestId, biomeId: -1 };',
+      '  var id = Module._get_biome_at_pos(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.flags || 0);',
+      '  return { type: "biomeAt", requestId: data.requestId, biomeId: id };',
+      '}',
+      '',
+      'function handleFindBiome(data) {',
+      '  if (!Module._find_nearest_biome) return { type: "foundBiome", requestId: data.requestId, found: 0 };',
+      '  var found = Module._find_nearest_biome(toBigInt(data.seed), data.mcVersion, data.dim, data.cx, data.cz, data.biomeId, data.maxRadius || 8000, data.flags || 0);',
+      '  var x = 0, z = 0;',
+      '  if (found) { x = Module._get_structure_x(0); z = Module._get_structure_z(0); }',
+      '  return { type: "foundBiome", requestId: data.requestId, found: found, x: x, z: z };',
+      '}',
+      '',
+      'var initPromise = null;',
+      'self.onmessage = function(e) {',
+      '  var data = e.data;',
+      '  if (data.type === "init") {',
+      '    if (!initPromise) initPromise = initWasm();',
+      '    initPromise.then(function() { self.postMessage({ type: "ready" }); })',
+      '    .catch(function(err) { self.postMessage({ type: "error", error: String(err) }); });',
+      '    return;',
+      '  }',
+      '  function run() {',
+      '    var result;',
+      '    try {',
+      '      switch (data.type) {',
+      '        case "generateBiomeImage": result = handleGenerateBiomeImage(data); break;',
+      '        case "findStructures": result = handleFindStructures(data); break;',
+      '        case "findSpawn": result = handleFindSpawn(data); break;',
+      '        case "findStrongholds": result = handleFindStrongholds(data); break;',
+      '        case "checkSlimeBatch": result = handleCheckSlimeBatch(data); break;',
+      '        case "getBiomeAt": result = handleGetBiomeAt(data); break;',
+      '        case "findBiome": result = handleFindBiome(data); break;',
+      '        default: result = { type: "error", error: "Unknown: " + data.type };',
+      '      }',
+      '    } catch(err) { result = { type: "error", requestId: data.requestId, error: String(err) }; }',
+      '    self.postMessage(result);',
+      '  }',
+      '  if (!Module) { if (!initPromise) initPromise = initWasm(); initPromise.then(run); } else { run(); }',
+      '};'
+    ].join('\n');
+  }
+
+  function createWorkerPool() {
     setStatus('Downloading WASM engine...');
     return fetch(WASM_BASE + 'api.js').then(function(resp) {
       if (!resp.ok) throw new Error('api.js HTTP ' + resp.status);
       return resp.text();
     }).then(function(apiCode) {
-      setStatus('Building worker...');
-      var workerSrc = [
-        '/* Emscripten glue */',
-        apiCode,
-        '',
-        'var Module = null;',
-        'function toBigInt(val) { if (typeof val === "bigint") return val; return BigInt(Math.trunc(val)); }',
-        '',
-        'async function initWasm() {',
-        '  Module = await createModule({ locateFile: function(path) { return "' + WASM_BASE + '" + path; } });',
-        '  Module._init_colors();',
-        '}',
-        '',
-        'function handleGenerateBiomeImage(data) {',
-        '  var fn = data.flags && Module._generate_biome_image_ex ? Module._generate_biome_image_ex : Module._generate_biome_image;',
-        '  var ptr;',
-        '  if (data.flags && Module._generate_biome_image_ex) {',
-        '    ptr = fn(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.width, data.height, data.scale, data.flags || 0);',
-        '  } else {',
-        '    ptr = Module._generate_biome_image(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.width, data.height, data.scale);',
-        '  }',
-        '  if (!ptr) return { type: "biomeImage", requestId: data.requestId, error: "Generation failed" };',
-        '  var size = data.width * data.height * 4;',
-        '  var pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, size).slice();',
-        '  Module._free_memory(ptr);',
-        '  return { type: "biomeImage", requestId: data.requestId, pixels: pixels, width: data.width, height: data.height };',
-        '}',
-        '',
-        'function handleFindStructures(data) {',
-        '  var count = data.fast ? Module._find_structures_fast(toBigInt(data.seed), data.mcVersion, data.structType, data.regXMin, data.regZMin, data.regXMax, data.regZMax) : Module._find_structures(toBigInt(data.seed), data.mcVersion, data.structType, data.regXMin, data.regZMin, data.regXMax, data.regZMax);',
-        '  var positions = [];',
-        '  for (var i = 0; i < count; i++) { positions.push({ x: Module._get_structure_x(i), z: Module._get_structure_z(i) }); }',
-        '  return { type: "structures", requestId: data.requestId, positions: positions, structKey: data.structKey };',
-        '}',
-        '',
-        'function handleFindSpawn(data) {',
-        '  return { type: "spawn", requestId: data.requestId, x: Module._get_spawn_x(toBigInt(data.seed), data.mcVersion), z: Module._get_spawn_z(toBigInt(data.seed), data.mcVersion) };',
-        '}',
-        '',
-        'function handleFindStrongholds(data) {',
-        '  var found = Module._find_strongholds(toBigInt(data.seed), data.mcVersion, data.count || 3);',
-        '  var positions = [];',
-        '  for (var i = 0; i < found; i++) { positions.push({ x: Module._get_stronghold_x(i), z: Module._get_stronghold_z(i) }); }',
-        '  return { type: "strongholds", requestId: data.requestId, positions: positions };',
-        '}',
-        '',
-        'function handleCheckSlimeBatch(data) {',
-        '  var ptr = Module._check_slime_batch(toBigInt(data.seed), data.chunkXMin, data.chunkZMin, data.width, data.height);',
-        '  if (!ptr) return { type: "slimeBatch", requestId: data.requestId, error: "Batch failed" };',
-        '  var total = data.width * data.height;',
-        '  var result = new Uint8Array(Module.HEAPU8.buffer, ptr, total).slice();',
-        '  return { type: "slimeBatch", requestId: data.requestId, result: result, width: data.width, height: data.height };',
-        '}',
-        '',
-        'function handleGetBiomeAt(data) {',
-        '  if (!Module._get_biome_at_pos) return { type: "biomeAt", requestId: data.requestId, biomeId: -1 };',
-        '  var id = Module._get_biome_at_pos(toBigInt(data.seed), data.mcVersion, data.dim, data.x, data.z, data.flags || 0);',
-        '  return { type: "biomeAt", requestId: data.requestId, biomeId: id };',
-        '}',
-        '',
-        'function handleFindBiome(data) {',
-        '  if (!Module._find_nearest_biome) return { type: "foundBiome", requestId: data.requestId, found: 0 };',
-        '  var found = Module._find_nearest_biome(toBigInt(data.seed), data.mcVersion, data.dim, data.cx, data.cz, data.biomeId, data.maxRadius || 8000, data.flags || 0);',
-        '  var x = 0, z = 0;',
-        '  if (found) { x = Module._get_structure_x(0); z = Module._get_structure_z(0); }',
-        '  return { type: "foundBiome", requestId: data.requestId, found: found, x: x, z: z };',
-        '}',
-        '',
-        'var initPromise = null;',
-        'self.onmessage = function(e) {',
-        '  var data = e.data;',
-        '  if (data.type === "init") {',
-        '    if (!initPromise) initPromise = initWasm();',
-        '    initPromise.then(function() { self.postMessage({ type: "ready" }); })',
-        '    .catch(function(err) { self.postMessage({ type: "error", error: String(err) }); });',
-        '    return;',
-        '  }',
-        '  function run() {',
-        '    var result;',
-        '    try {',
-        '      switch (data.type) {',
-        '        case "generateBiomeImage": result = handleGenerateBiomeImage(data); break;',
-        '        case "findStructures": result = handleFindStructures(data); break;',
-        '        case "findSpawn": result = handleFindSpawn(data); break;',
-        '        case "findStrongholds": result = handleFindStrongholds(data); break;',
-        '        case "checkSlimeBatch": result = handleCheckSlimeBatch(data); break;',
-        '        case "getBiomeAt": result = handleGetBiomeAt(data); break;',
-        '        case "findBiome": result = handleFindBiome(data); break;',
-        '        default: result = { type: "error", error: "Unknown: " + data.type };',
-        '      }',
-        '    } catch(err) { result = { type: "error", requestId: data.requestId, error: String(err) }; }',
-        '    self.postMessage(result);',
-        '  }',
-        '  if (!Module) { if (!initPromise) initPromise = initWasm(); initPromise.then(run); } else { run(); }',
-        '};'
-      ].join('\n');
+      setStatus('Building workers...');
+      var src = buildWorkerSrc(apiCode);
+      var blob = new Blob([src], { type: 'application/javascript' });
+      var blobUrl = URL.createObjectURL(blob);
+      var workers = [];
+      for (var i = 0; i < WORKER_POOL_SIZE; i++) {
+        workers.push(new Worker(blobUrl));
+      }
 
-      setStatus('Creating worker...');
-      var blob = new Blob([workerSrc], { type: 'application/javascript' });
-      return new Worker(URL.createObjectURL(blob));
+      /* Init all workers in parallel, resolve when ALL are ready */
+      var readyCount = 0;
+      var pool = {
+        _workers: workers,
+        _robin: 0,
+        /* Primary worker for non-tile tasks (structures, spawn, etc.) */
+        primary: workers[0],
+        /* Round-robin pick for tile generation */
+        nextTileWorker: function() {
+          this._robin = (this._robin + 1) % workers.length;
+          return workers[this._robin];
+        },
+        /* Broadcast addEventListener to all workers */
+        addEventListener: function(type, fn) { workers.forEach(function(w) { w.addEventListener(type, fn); }); },
+        removeEventListener: function(type, fn) { workers.forEach(function(w) { w.removeEventListener(type, fn); }); },
+        /* postMessage to primary only (for structures/spawn/etc) */
+        postMessage: function(msg) { this.primary.postMessage(msg); },
+        initAll: function() {
+          return new Promise(function(resolve, reject) {
+            var failed = false;
+            workers.forEach(function(w) {
+              w.addEventListener('message', function onMsg(e) {
+                if (e.data.type === 'ready') {
+                  w.removeEventListener('message', onMsg);
+                  readyCount++;
+                  if (readyCount === workers.length) resolve();
+                } else if (e.data.type === 'error' && !failed) {
+                  failed = true;
+                  reject(new Error(e.data.error));
+                }
+              });
+              w.postMessage({ type: 'init' });
+            });
+          });
+        }
+      };
+      return pool;
     });
+  }
+
+  /* Back-compat: single worker creator (unused, kept for fallback) */
+  function createWorker() {
+    return createWorkerPool().then(function(pool) { return pool; });
   }
 
   /* ============================================================
@@ -310,16 +361,20 @@
 
   /* ============================================================
    *  BIOME LAYER (Canvas tiles from WASM)
+   *  - Uses worker pool round-robin for parallel tile generation
+   *  - Generation counter to cancel stale requests on zoom/pan
    * ============================================================ */
-  function createBiomeLayer(worker, getState) {
+  var _tileGeneration = 0; /* incremented on zoom/redraw to cancel stale tiles */
+
+  function createBiomeLayer(workerPool, getState) {
     var pending = new Map();
-    var tileCache = new LRUCache(200);
+    var tileCache = new LRUCache(500);
     var BL = L.GridLayer.extend({
-      options: { tileSize: TS, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 2 },
+      options: { tileSize: TS, updateWhenZooming: false, updateWhenIdle: true, keepBuffer: 4 },
       createTile: function(coords, done) {
         var canvas = document.createElement('canvas');
         canvas.width = TS; canvas.height = TS;
-        canvas.style.opacity = '0'; canvas.style.transition = 'opacity 0.3s';
+        canvas.style.opacity = '0'; canvas.style.transition = 'opacity 0.25s';
         var ctx = canvas.getContext('2d');
         ctx.fillStyle = '#1a1a2e'; ctx.fillRect(0, 0, TS, TS);
         var st = getState();
@@ -342,12 +397,25 @@
           return canvas;
         }
 
-        if (pending.has(rid)) worker.removeEventListener('message', pending.get(rid));
+        /* Cancel previous pending request for same tile ID */
+        if (pending.has(rid)) {
+          var old = pending.get(rid);
+          old.worker.removeEventListener('message', old.handler);
+          pending.delete(rid);
+        }
+
+        /* Capture current generation so we can discard stale responses */
+        var myGen = _tileGeneration;
+
+        /* Pick a worker from the pool via round-robin */
+        var tileWorker = workerPool.nextTileWorker();
         var handler = function(e) {
           var m = e.data;
           if (m.type !== 'biomeImage' || m.requestId !== rid) return;
-          worker.removeEventListener('message', handler);
+          tileWorker.removeEventListener('message', handler);
           pending.delete(rid);
+          /* Discard if generation changed (user zoomed/panned away) */
+          if (myGen !== _tileGeneration) { return; }
           if (m.error) { canvas.style.opacity = '1'; done(new Error(m.error), canvas); return; }
           try {
             var imgData = new ImageData(new Uint8ClampedArray(m.pixels), m.width, m.height);
@@ -362,13 +430,17 @@
           canvas.style.opacity = '1';
           done(null, canvas);
         };
-        pending.set(rid, handler);
-        worker.addEventListener('message', handler);
-        worker.postMessage({ type: 'generateBiomeImage', seed: st.seed, mcVersion: st.mcVersion, dim: st.dimension, x: gx, z: gz, width: gw, height: gh, scale: cs, flags: st.flags || 0, requestId: rid });
+        pending.set(rid, { handler: handler, worker: tileWorker });
+        tileWorker.addEventListener('message', handler);
+        tileWorker.postMessage({ type: 'generateBiomeImage', seed: st.seed, mcVersion: st.mcVersion, dim: st.dimension, x: gx, z: gz, width: gw, height: gh, scale: cs, flags: st.flags || 0, requestId: rid });
         return canvas;
       }
     });
-    return new BL();
+    var layer = new BL();
+    /* Override redraw to bump generation counter — cancels stale tiles */
+    var origRedraw = layer.redraw.bind(layer);
+    layer.redraw = function() { _tileGeneration++; origRedraw(); };
+    return layer;
   }
 
   /* ============================================================
@@ -376,7 +448,7 @@
    * ============================================================ */
   function createStructureLayer(worker, map, getState) {
     var lg = L.layerGroup(), markers = [], deb = null, activeReqs = new Set(), slimeLayer = null, cache = new Map();
-    var spawnPos = null, structCounts = {};
+    var spawnPos = null, structCounts = {}, structGeneration = 0;
 
     function clearMarkers() { markers.forEach(function(m) { lg.removeLayer(m); }); markers = []; structCounts = {}; }
     function toLL(x, z) { return L.latLng(-z, x); }
@@ -418,7 +490,7 @@
       var z = map.getZoom(), b = map.getBounds();
       var x1 = Math.floor(b.getWest()), x2 = Math.ceil(b.getEast());
       var z1 = Math.floor(-b.getNorth()), z2 = Math.ceil(-b.getSouth());
-      clearMarkers(); activeReqs.clear(); updateSlime(st);
+      structGeneration++; clearMarkers(); activeReqs.clear(); updateSlime(st);
       var dim = st.dimension;
 
       var structs = Object.keys(FEATURES).filter(function(k) {
@@ -440,11 +512,14 @@
         if (cache.has(ck)) { cache.get(ck).forEach(function(p) { addMarker(k, p.x, p.z); }); updateBadges(); return; }
 
         var rid = 's_' + ck; activeReqs.add(rid);
+        var myGen = structGeneration;
         var h = function(e) {
           var msg = e.data;
           if (msg.type !== 'structures' || msg.requestId !== rid || !activeReqs.has(rid)) return;
           worker.removeEventListener('message', h);
-          if (cache.size >= 300) cache.delete(cache.keys().next().value);
+          /* Discard if a newer update already cleared us */
+          if (myGen !== structGeneration) return;
+          if (cache.size >= 500) cache.delete(cache.keys().next().value);
           cache.set(ck, msg.positions);
           msg.positions.forEach(function(p) { addMarker(k, p.x, p.z); });
           updateBadges();
@@ -568,42 +643,45 @@
   /* ============================================================
    *  BIOME TOOLTIP
    * ============================================================ */
-  function createBiomeTooltip(worker, map, getState) {
+  function createBiomeTooltip(workerPool, map, getState) {
     var tip = ce('div', 'mc-biome-tip',
       '<span class="mc-biome-swatch" id="mc-bswatch"></span>' +
       '<span class="mc-biome-name" id="mc-bname">-</span>' +
       '<span class="mc-biome-id" id="mc-bid"></span>');
     app.appendChild(tip);
-    var lastReq = 0, biomeColors = null;
-    var throttleMs = 120;
+    var lastReq = 0;
+    var throttleMs = 200;
+    var isZooming = false;
+    var lastHandler = null;
 
-    /* Fetch biome colors once */
-    worker.addEventListener('message', function onColors(e) {
-      if (e.data.type === 'ready') {
-        /* Colors are embedded in the WASM module; we know them from BIOME_NAMES palette */
-      }
-    });
+    /* Pause tooltip during zoom to avoid flooding the worker */
+    map.on('zoomstart', function() { isZooming = true; tip.classList.remove('mc-visible'); });
+    map.on('zoomend', function() { setTimeout(function() { isZooming = false; }, 300); });
 
     map.on('mousemove', function(e) {
+      if (isZooming) return;
       var now = Date.now();
       if (now - lastReq < throttleMs) return;
       lastReq = now;
       var st = getState(); if (!st) return;
       var x = Math.round(e.latlng.lng), z = Math.round(-e.latlng.lat);
       var rid = 'bio_' + now;
+      /* Remove previous pending tooltip handler to prevent listener buildup */
+      if (lastHandler) { workerPool.primary.removeEventListener('message', lastHandler); }
       var h = function(ev) {
         var msg = ev.data;
         if (msg.type !== 'biomeAt' || msg.requestId !== rid) return;
-        worker.removeEventListener('message', h);
+        workerPool.primary.removeEventListener('message', h);
+        lastHandler = null;
         var id = msg.biomeId;
         var name = BIOME_NAMES[id] || ('Biome ' + id);
         $('mc-bname').textContent = name;
         $('mc-bid').textContent = '#' + id;
-        /* Use a simple color from the known palette or fallback */
         tip.classList.add('mc-visible');
       };
-      worker.addEventListener('message', h);
-      worker.postMessage({ type: 'getBiomeAt', seed: st.seed, mcVersion: st.mcVersion, dim: st.dimension, x: x, z: z, flags: st.flags || 0, requestId: rid });
+      lastHandler = h;
+      workerPool.primary.addEventListener('message', h);
+      workerPool.primary.postMessage({ type: 'getBiomeAt', seed: st.seed, mcVersion: st.mcVersion, dim: st.dimension, x: x, z: z, flags: st.flags || 0, requestId: rid });
     });
 
     map.on('mouseout', function() { tip.classList.remove('mc-visible'); });
@@ -1210,19 +1288,22 @@
 
       setStatus('Loading WASM engine...');
 
-      var loadTimeout = setTimeout(function() { setError('Loading timed out.'); switchToIframe('timeout'); }, 15000);
+      var loadTimeout = setTimeout(function() { setError('Loading timed out.'); switchToIframe('timeout'); }, 20000);
 
-      createWorker().then(function(worker) {
-        setStatus('Initializing WASM...');
+      createWorkerPool().then(function(workerPool) {
+        setStatus('Initializing WASM (' + WORKER_POOL_SIZE + ' workers)...');
         var getState = function() { return curState; };
-        var biomeLayer = createBiomeLayer(worker, getState);
-        var structMgr = createStructureLayer(worker, theMap, getState);
+        var biomeLayer = createBiomeLayer(workerPool, getState);
+        var structMgr = createStructureLayer(workerPool.primary, theMap, getState);
         var GC = createGridLayer(), gridLayer = new GC();
         biomeLayer.addTo(theMap);
         structMgr.layer.addTo(theMap);
 
+        /* Bump generation counter on zoom to cancel stale tile requests */
+        theMap.on('zoomstart', function() { _tileGeneration++; });
+
         /* Controls */
-        var controls = setupControls(theMap, worker, function(ns) {
+        var controls = setupControls(theMap, workerPool.primary, function(ns) {
           curState = ns;
           biomeLayer.redraw();
           structMgr.update();
@@ -1230,7 +1311,7 @@
         });
 
         /* Biome tooltip */
-        createBiomeTooltip(worker, theMap, getState);
+        createBiomeTooltip(workerPool, theMap, getState);
 
         /* Context menu */
         createContextMenu(theMap, getState, structMgr);
@@ -1255,25 +1336,21 @@
         document.addEventListener('mcFeatChanged', function() { if (curState) structMgr.update(); });
         theMap.on('moveend', function() { if (curState) structMgr.scheduleUpdate(); });
 
-        worker.addEventListener('message', function onReady(e) {
-          if (e.data.type === 'ready') {
-            clearTimeout(loadTimeout);
-            worker.removeEventListener('message', onReady);
-            setStatus('Ready!');
-            var overlay = $('mc-loading-overlay');
-            if (overlay) { overlay.classList.add('mc-hidden'); setTimeout(function() { overlay.style.display = 'none'; }, 600); }
-            curState = controls.getState();
-            biomeLayer.redraw();
-            structMgr.update();
-            bmMarkers.refresh();
-          } else if (e.data.type === 'error') {
-            clearTimeout(loadTimeout);
-            worker.removeEventListener('message', onReady);
-            setError('Engine error: ' + e.data.error);
-            switchToIframe('wasm-error');
-          }
+        /* Init all workers in parallel */
+        workerPool.initAll().then(function() {
+          clearTimeout(loadTimeout);
+          setStatus('Ready!');
+          var overlay = $('mc-loading-overlay');
+          if (overlay) { overlay.classList.add('mc-hidden'); setTimeout(function() { overlay.style.display = 'none'; }, 600); }
+          curState = controls.getState();
+          biomeLayer.redraw();
+          structMgr.update();
+          bmMarkers.refresh();
+        })['catch'](function(err) {
+          clearTimeout(loadTimeout);
+          setError('Engine error: ' + err.message);
+          switchToIframe('wasm-error');
         });
-        worker.postMessage({ type: 'init' });
       })['catch'](function(err) {
         clearTimeout(loadTimeout);
         setError('Worker failed: ' + err.message);
