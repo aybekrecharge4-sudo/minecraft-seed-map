@@ -10,15 +10,30 @@
   var LEAFLET_JS  = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
 
   /* ============================================================
-   *  DOM CHECK
+   *  DOM CHECK — wait for #mc-seed-map-app to exist
    * ============================================================ */
-  var app = document.getElementById('mc-seed-map-app');
-  if (!app) {
+  function waitForApp(cb) {
+    var el = document.getElementById('mc-seed-map-app');
+    if (el) { cb(el); return; }
+    /* DOM still loading — wait for DOMContentLoaded */
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', arguments.callee);
+      document.addEventListener('DOMContentLoaded', function() {
+        var el2 = document.getElementById('mc-seed-map-app');
+        if (el2) cb(el2);
+      });
+      return;
     }
-    return;
+    /* DOM ready but element missing — poll briefly (covers async script edge cases) */
+    var attempts = 0;
+    var timer = setInterval(function() {
+      var el3 = document.getElementById('mc-seed-map-app');
+      if (el3) { clearInterval(timer); cb(el3); return; }
+      if (++attempts > 50) clearInterval(timer); /* give up after ~5 s */
+    }, 100);
   }
+
+  waitForApp(function(app) { mcSeedMapInit(app); });
+  function mcSeedMapInit(app) {
 
   /* ============================================================
    *  UTILS
@@ -1363,5 +1378,7 @@
       switchToIframe('init-exception');
     }
   });
+
+  } /* end mcSeedMapInit */
 
 })();
